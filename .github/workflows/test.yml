@@ -10,17 +10,14 @@ on:
   issue_comment:
     types: [created]
 
-# Permessi minimi necessari: lettura del codice + scrittura sulle issue/PR
-# per poter aggiungere la reaction al commento.
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
+  pull-requests: write  # Needed for rocket reaction on /test command
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Esegui su eventi PR, push, o quando un utente AUTORIZZATO commenta /test su una PR
+    # Run on PR/push events, or when authorized user comments /test on a PR
     if: |
       github.event_name == 'pull_request' ||
       github.event_name == 'push' ||
@@ -57,26 +54,33 @@ jobs:
           go-version: '1.23'
 
       - name: Run tests
-        run: go test ./...
+        id: test
+        run: |
+          if go test ./...; then
+            echo "success" > result.txt
+          else
+            echo "failure" > result.txt
+            exit 1
+          fi
+        continue-on-error: true
 
-      - name: Report status to PR
-        if: always() && (github.event_name == 'issue_comment' || github.event_name == 'pull_request')
-        uses: actions/github-script@v7
+      - name: Save PR number and event type
+        if: github.event_name == 'pull_request' || github.event_name == 'issue_comment'
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "${{ github.event.pull_request.number }}" > pr-number.txt
+          else
+            echo "${{ github.event.issue.number }}" > pr-number.txt
+          fi
+          echo "${{ github.event_name }}" > event-type.txt
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          script: |
-            const conclusion = '${{ job.status }}' === 'success'
-              ? '✅ Tests passed'
-              : '❌ Tests failed';
-
-            const prNumber = context.issue.number || context.payload.pull_request.number;
-
-            const trigger = context.eventName === 'issue_comment'
-              ? 'Triggered by `/test` command'
-              : 'Triggered by pull request';
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
-              body: `${conclusion}\n\n${trigger}\n\n[View workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})`
-            });
+          name: test-results
+          path: |
+            result.txt
+            pr-number.txt
+            event-type.txt
+          if-no-files-found: warn

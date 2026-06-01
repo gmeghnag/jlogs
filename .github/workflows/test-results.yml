@@ -1,0 +1,70 @@
+name: Test Results
+
+on:
+  workflow_run:
+    workflows: ["Test"]
+    types:
+      - completed
+
+permissions:
+  pull-requests: write
+  issues: write
+  actions: read
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'issue_comment'
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: test-results
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Read test results
+        id: results
+        run: |
+          if [ -f result.txt ]; then
+            echo "status=$(cat result.txt)" >> $GITHUB_OUTPUT
+          else
+            echo "status=unknown" >> $GITHUB_OUTPUT
+          fi
+          if [ -f pr-number.txt ]; then
+            echo "pr_number=$(cat pr-number.txt)" >> $GITHUB_OUTPUT
+          else
+            echo "No PR number found, skipping comment"
+            exit 0
+          fi
+          if [ -f event-type.txt ]; then
+            echo "event_type=$(cat event-type.txt)" >> $GITHUB_OUTPUT
+          else
+            echo "event_type=pull_request" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Post comment to PR
+        if: steps.results.outputs.pr_number != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ steps.results.outputs.status }}';
+            const prNumber = '${{ steps.results.outputs.pr_number }}';
+            const eventType = '${{ steps.results.outputs.event_type }}';
+
+            const conclusion = status === 'success'
+              ? '✅ Tests passed'
+              : '❌ Tests failed';
+
+            const trigger = eventType === 'issue_comment'
+              ? 'Triggered by `/test` command'
+              : 'Triggered by pull request';
+
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${{ github.event.workflow_run.id }}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: parseInt(prNumber),
+              body: `${conclusion}\n\n${trigger}\n\n[View workflow run](${runUrl})`
+            });
