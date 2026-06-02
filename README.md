@@ -8,12 +8,12 @@ A fast Go CLI tool that parses and aggregates log lines into a structured JSON s
 
 `jlogs` reads log files (or stdin), recognizes klog-style and JSON-structured log formats, groups entries by severity and source location, and outputs a JSON summary with occurrence counts and recent examples.
 
-**IMPORTANT**: `jlogs` requires that **every log line** starts with an RFC3339Nano timestamp (30 characters). This is the format produced by `oc logs --timestamps=true` or `kubectl logs --timestamps=true`. Without the `--timestamps=true` flag, `jlogs` will exit with an error.
-
 Supported log formats:
-- **klog-style**: `2024-12-30T10:46:29.390512670Z I1230 10:46:29.390512  1 node_controller.go:1056] No nodes available`
-- **JSON-structured**: `2024-12-30T10:46:29.390512670Z {"level":"info","caller":"foo.go:42","msg":"..."}`
-- **unstructured**: Any line with a valid timestamp that doesn't match klog or JSON formats
+- **klog-style**: `I1230 10:46:29.390512  1 node_controller.go:1056] No nodes available`
+- **JSON-structured**: `{"level":"info","caller":"foo.go:42","msg":"..."}`
+- **unstructured**: Lines that don't match klog or JSON formats
+
+**Timestamp handling**: Lines may optionally start with an RFC3339 timestamp prefix (e.g. from `kubectl logs --timestamps=true`). When present, it is used; when absent, klog lines derive a timestamp from their own `MMDD HH:MM:SS` fields, and other lines inherit the most recently seen timestamp.
 
 ## Installation
 
@@ -39,20 +39,18 @@ go build -o jlogs ./cmd/jlogs
 
 ## Usage
 
-**Kubernetes/OpenShift logs (recommended):**
+**Kubernetes/OpenShift logs:**
 ```bash
-# CORRECT: With --timestamps=true
+# With --timestamps=true (recommended for best timeline accuracy)
 oc logs -n openshift-etcd pod-name --timestamps=true | jlogs
 kubectl logs pod-name --timestamps=true | jlogs
 
-# WRONG: Without timestamps will fail
+# Without --timestamps also works (klog timestamps are used automatically)
 oc logs pod-name | jlogs
-# Error: invalid timestamp prefix - did you forget --timestamps=true?
 ```
 
 **Local files:**
 ```bash
-# Files must have RFC3339Nano timestamp prefix on each line
 cat app.log | jlogs
 jlogs app.log error.log
 
