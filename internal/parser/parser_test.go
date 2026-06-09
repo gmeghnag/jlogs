@@ -923,6 +923,202 @@ func TestKlogLineWithoutRFC3339Prefix(t *testing.T) {
 	}
 }
 
+func TestParseOVSLine(t *testing.T) {
+	p, _ := New(5, 1, 0)
+	line := `2026-03-11T11:44:42Z |  8  | reconnect | INFO | unix:/var/run/openvswitch/db.sock: connecting...`
+	p.parseLine(line)
+
+	summary := p.Summary()
+	infos := summary["info"]
+	if len(infos) != 1 {
+		t.Fatalf("info entries = %d, want 1", len(infos))
+	}
+	// Source is the normalized message, not the module name.
+	if infos[0].Source != "unix:/var/run/openvswitch/db.sock: connecting..." {
+		t.Errorf("source = %q, want message text", infos[0].Source)
+	}
+	msg, ok := infos[0].Recent[0].Log.(string)
+	if !ok || msg != "unix:/var/run/openvswitch/db.sock: connecting..." {
+		t.Errorf("log = %q, want OVS message text", msg)
+	}
+	if infos[0].Recent[0].Time != "2026-03-11T11:44:42Z" {
+		t.Errorf("time = %q, want 2026-03-11T11:44:42Z", infos[0].Recent[0].Time)
+	}
+}
+
+func TestOVSLineSeverities(t *testing.T) {
+	cases := []struct {
+		level string
+		want  string
+	}{
+		{"INFO", "info"},
+		{"WARN", "warning"},
+		{"ERR", "error"},
+		{"EMER", "fatal"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.level, func(t *testing.T) {
+			p, _ := New(5, 1, 0)
+			line := `2026-03-11T11:44:42Z | 10 | mymod | ` + tc.level + ` | test message`
+			p.parseLine(line)
+			if got := len(p.Summary()[tc.want]); got != 1 {
+				t.Errorf("severity %q: got %d entries in bucket %q, want 1", tc.level, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOVSLineUnknownSeverity(t *testing.T) {
+	p, _ := New(5, 1, 0)
+	line := `2026-03-11T11:44:42Z | 10 | mymod | DBG | debug message`
+	p.parseLine(line)
+
+	summary := p.Summary()
+	if got := len(summary["unstructured"]); got != 1 {
+		t.Fatalf("unstructured entries = %d, want 1", got)
+	}
+	// Source is the normalized message, not the module.
+	if summary["unstructured"][0].Source != "debug message" {
+		t.Errorf("source = %q, want \"debug message\"", summary["unstructured"][0].Source)
+	}
+}
+
+func TestOVSLineWithoutTimestamp(t *testing.T) {
+	p, _ := New(5, 1, 0)
+	// Same message — both should aggregate under the same source key.
+	p.parseLine(`2026-03-11T11:44:42Z |  8  | reconnect | INFO | same message`)
+	p.parseLine(`| 10 | reconnect | INFO | same message`)
+
+	summary := p.Summary()
+	infos := summary["info"]
+	if len(infos) != 1 {
+		t.Fatalf("info entries = %d, want 1", len(infos))
+	}
+	if infos[0].Occurrences != 2 {
+		t.Errorf("occurrences = %d, want 2", infos[0].Occurrences)
+	}
+	if infos[0].Recent[1].Time != "2026-03-11T11:44:42Z" {
+		t.Errorf("inherited time = %q, want 2026-03-11T11:44:42Z", infos[0].Recent[1].Time)
+	}
+}
+
+func TestOVSMessageNormalization(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{
+			"Tunnel ovn-58c153-0 appeared in OVSDB",
+			"Tunnel ovn-XXXXXX-0 appeared in OVSDB",
+		},
+		{
+			"Connection ovn-e8c80c-0-out-1 went down, bringing it up",
+			"Connection ovn-XXXXXX-0-out-1 went down, bringing it up",
+		},
+		{
+			"ovn-e8c80c-0-out-1 is defunct, removing",
+			"ovn-XXXXXX-0-out-1 is defunct, removing",
+		},
+		{
+			"Starting ipsec connection ovn-7fdd40-0-out-1",
+			"Starting ipsec connection ovn-XXXXXX-0-out-1",
+		},
+		{
+			"Connections for all(125) configured tunnels are Up.",
+			"Connections for all(N) configured tunnels are Up.",
+		},
+		{
+			"Refreshing LibreSwan configuration",
+			"Refreshing LibreSwan configuration",
+		},
+		{
+			"unix:/var/run/openvswitch/db.sock: connecting...",
+			"unix:/var/run/openvswitch/db.sock: connecting...",
+		},
+	}
+	for _, tc := range cases {
+		got := normalizeOVSMessage(tc.input)
+		if got != tc.want {
+			t.Errorf("normalizeOVSMessage(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestOVSLogFileIntegration(t *testing.T) {
+	p, _ := New(5, 1, 0)
+	// Representative sample from openshift-ovn-kubernetes_ovn-ipsec-host-l4cd5_ovn-ipsec.log
+	lines := []string{
+		// reconnect module lines (no tunnel IDs)
+		`2026-03-11T11:44:42Z |  8  | reconnect | INFO | unix:/var/run/openvswitch/db.sock: connecting...`,
+		`2026-03-11T11:44:42Z |  12 | reconnect | INFO | unix:/var/run/openvswitch/db.sock: connected`,
+		// tunnel appearances — different IDs should collapse to same source
+		`2026-03-11T11:44:42Z |  21 | ovs-monitor-ipsec | INFO | Tunnel ovn-58c153-0 appeared in OVSDB`,
+		`2026-03-11T11:44:42Z |  23 | ovs-monitor-ipsec | INFO | Tunnel ovn-f7babc-0 appeared in OVSDB`,
+		`2026-03-11T11:44:42Z |  25 | ovs-monitor-ipsec | INFO | Tunnel ovn-ec7044-0 appeared in OVSDB`,
+		// connection events
+		`2026-03-11T11:44:43Z | 277 | ovs-monitor-ipsec | INFO | Connection ovn-e8c80c-0-out-1 went down, bringing it up`,
+		`2026-03-11T11:44:43Z | 279 | ovs-monitor-ipsec | INFO | Connection ovn-e8c80c-0-in-1 went down, bringing it up`,
+		// static messages
+		`2026-03-11T11:44:43Z | 273 | ovs-monitor-ipsec | INFO | Refreshing LibreSwan configuration`,
+		`2026-03-11T11:44:43Z | 293 | ovs-monitor-ipsec | INFO | Refreshing is done.`,
+		// count param
+		`2026-03-11T11:45:13Z | 315 | ovs-monitor-ipsec | INFO | Connections for all(125) configured tunnels are Up.`,
+	}
+	for _, l := range lines {
+		if err := p.parseLine(l); err != nil {
+			t.Fatalf("parseLine: %v", err)
+		}
+	}
+
+	summary := p.Summary()
+	infos := summary["info"]
+
+	// Build source→occurrences map for easy assertion.
+	bySource := make(map[string]int)
+	for _, e := range infos {
+		bySource[e.Source] = e.Occurrences
+	}
+
+	// Three tunnel lines should collapse to one template source.
+	tunnelKey := "Tunnel ovn-XXXXXX-0 appeared in OVSDB"
+	if bySource[tunnelKey] != 3 {
+		t.Errorf("source %q: occurrences = %d, want 3", tunnelKey, bySource[tunnelKey])
+	}
+
+	// Connection lines with different IDs but same direction collapse.
+	connKey := "Connection ovn-XXXXXX-0-out-1 went down, bringing it up"
+	if bySource[connKey] != 1 {
+		t.Errorf("source %q: occurrences = %d, want 1", connKey, bySource[connKey])
+	}
+
+	// Static message used verbatim.
+	if bySource["Refreshing LibreSwan configuration"] != 1 {
+		t.Errorf("static source occurrences = %d, want 1", bySource["Refreshing LibreSwan configuration"])
+	}
+
+	// Paren-number param normalized.
+	countKey := "Connections for all(N) configured tunnels are Up."
+	if bySource[countKey] != 1 {
+		t.Errorf("source %q: occurrences = %d, want 1", countKey, bySource[countKey])
+	}
+
+	// Raw messages preserved in payloads (not normalized).
+	for _, e := range infos {
+		if e.Source == tunnelKey {
+			for _, occ := range e.Recent {
+				msg, ok := occ.Log.(string)
+				if !ok {
+					t.Errorf("tunnel log payload is not string: %T", occ.Log)
+					continue
+				}
+				if msg == tunnelKey {
+					t.Errorf("tunnel log payload should be raw (with actual ID), got normalized key: %q", msg)
+				}
+			}
+		}
+	}
+}
+
 func TestShellTraceLineInheritsTimestamp(t *testing.T) {
 	// Shell xtrace lines (++ cmd) have no timestamp and should inherit the
 	// last seen timestamp and be captured as unstructured.

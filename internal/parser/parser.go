@@ -93,6 +93,24 @@ var klogLevelToSeverity = map[byte]Severity{
 	'F': SevFatal,
 }
 
+// ovsPattern matches OVS pipe-delimited log lines after the timestamp prefix
+// has been stripped: | SEQ | MODULE | LEVEL | MESSAGE
+var ovsPattern = regexp.MustCompile(`\|\s*\d+\s*\|\s*(\S+)\s*\|\s*(\w+)\s*\|\s*(.*)`)
+
+// ovsHexID matches OVN tunnel/connection hex identifiers, e.g. ovn-58c153-
+var ovsHexID = regexp.MustCompile(`ovn-[0-9a-f]{4,}-`)
+
+// ovsParenNum matches parenthesized numbers, e.g. (125)
+var ovsParenNum = regexp.MustCompile(`\(\d+\)`)
+
+// ovsLevelToSeverity maps OVS severity strings to canonical severities.
+var ovsLevelToSeverity = map[string]Severity{
+	"INFO": SevInfo,
+	"WARN": SevWarning,
+	"ERR":  SevError,
+	"EMER": SevFatal,
+}
+
 // jsonLevelToSeverity maps the strings that may appear in a structured log's
 // "level" or "severity" field to our canonical severity.
 var jsonLevelToSeverity = map[string]Severity{

@@ -64,6 +64,18 @@ func (p *Parser) parseLine(line string) error {
 		return nil
 	}
 
+	// Try OVS pipe-delimited format: | SEQ | MODULE | LEVEL | MESSAGE
+	if m := ovsPattern.FindStringSubmatch(rest); m != nil {
+		source := normalizeOVSMessage(m[3])
+		sev, ok := ovsLevelToSeverity[m[2]]
+		if !ok {
+			p.addEntry(SevUnstructured, source, timestamp, m[3])
+			return nil
+		}
+		p.addEntry(sev, source, timestamp, m[3])
+		return nil
+	}
+
 	// Try JSON-structured format. Cheap shape check before invoking the
 	// JSON decoder, which is comparatively expensive.
 	if strings.HasPrefix(rest, "{") && strings.HasSuffix(rest, "}") {
@@ -75,6 +87,15 @@ func (p *Parser) parseLine(line string) error {
 	// Catch-all: didn't match any known format, capture as unstructured.
 	p.addEntry(SevUnstructured, "unstructured", timestamp, rest)
 	return nil
+}
+
+// normalizeOVSMessage replaces parameterized parts of an OVS log message with
+// placeholders so distinct tunnel/connection IDs and counts collapse to the
+// same template, which is then used as the aggregation source key.
+func normalizeOVSMessage(msg string) string {
+	s := ovsHexID.ReplaceAllString(msg, "ovn-XXXXXX-")
+	s = ovsParenNum.ReplaceAllString(s, "(N)")
+	return strings.TrimSpace(s)
 }
 
 // klogDerivedTimestamp builds a UTC RFC3339Nano timestamp from klog's MMDD
