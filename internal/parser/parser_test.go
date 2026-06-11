@@ -1119,6 +1119,123 @@ func TestOVSLogFileIntegration(t *testing.T) {
 	}
 }
 
+func TestParseJournalLine(t *testing.T) {
+	p, _ := New(5, 1, 0)
+	line := `Mar 11 11:34:49.808770 localhost kernel: Linux version 5.14.0`
+	if err := p.parseLine(line); err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	summary := p.Summary()
+	infos := summary["info"]
+	if len(infos) != 1 {
+		t.Fatalf("info entries = %d, want 1", len(infos))
+	}
+	if infos[0].Source != "kernel" {
+		t.Errorf("source = %q, want kernel", infos[0].Source)
+	}
+	msg, ok := infos[0].Recent[0].Log.(string)
+	if !ok || msg != "Linux version 5.14.0" {
+		t.Errorf("log = %q, want message text", msg)
+	}
+	// Timestamp must be a valid RFC3339Nano string.
+	if infos[0].Recent[0].Time == "" {
+		t.Errorf("time is empty, want RFC3339Nano")
+	}
+}
+
+func TestParseJournalLineWithPID(t *testing.T) {
+	p, _ := New(5, 1, 0)
+	line := `Mar 11 11:44:42.123456 ip-10-0-67-28 pluto[2541]: starting pluto`
+	if err := p.parseLine(line); err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	summary := p.Summary()
+	infos := summary["info"]
+	if len(infos) != 1 {
+		t.Fatalf("info entries = %d, want 1", len(infos))
+	}
+	// PID preserved in source key.
+	if infos[0].Source != "pluto[2541]" {
+		t.Errorf("source = %q, want pluto[2541]", infos[0].Source)
+	}
+}
+
+func TestJournalTimestampYearInference(t *testing.T) {
+	p, _ := New(5, 1, 0)
+	// Seed a lastTimestamp with a known year.
+	p.lastTimestamp = "2026-03-11T11:34:49Z"
+	line := `Mar 11 11:34:49.808770 localhost kernel: boot`
+	p.parseLine(line)
+
+	summary := p.Summary()
+	infos := summary["info"]
+	if len(infos) != 1 {
+		t.Fatalf("info entries = %d, want 1", len(infos))
+	}
+	ts := infos[0].Recent[0].Time
+	if !strings.HasPrefix(ts, "2026-") {
+		t.Errorf("timestamp = %q, want year 2026 inferred from lastTimestamp", ts)
+	}
+}
+
+func TestJournalBootSeparatorIsUnstructured(t *testing.T) {
+	p, _ := New(5, 1, 0)
+	line := `-- Boot 9c0f372855024d50b50626a7546de66d --`
+	if err := p.parseLine(line); err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	summary := p.Summary()
+	if got := len(summary["unstructured"]); got != 1 {
+		t.Errorf("unstructured entries = %d, want 1 (boot separator)", got)
+	}
+	if got := len(summary["info"]); got != 0 {
+		t.Errorf("info entries = %d, want 0", got)
+	}
+}
+
+func TestJournalLogFileIntegration(t *testing.T) {
+	p, _ := New(5, 1, 0)
+	lines := []string{
+		`-- Boot 9c0f372855024d50b50626a7546de66d --`,
+		`Mar 11 11:34:49.808770 localhost kernel: Linux version 5.14.0`,
+		`Mar 11 11:34:49.808794 localhost kernel: Command line: BOOT_IMAGE=...`,
+		`Mar 11 11:34:49.808810 localhost kernel: BIOS-provided physical RAM map`,
+		`Mar 11 11:44:42.000012 ip-10-0-67-28 pluto[2541]: starting pluto`,
+		`Mar 11 11:44:42.000064 ip-10-0-67-28 pluto[2541]: ike_alg_register: Registered IKEv1 IKE algorithm`,
+		`Mar 11 11:44:43.000100 ip-10-0-67-28 systemd[1]: Started ipsec.service`,
+	}
+	for _, l := range lines {
+		if err := p.parseLine(l); err != nil {
+			t.Fatalf("parseLine(%q): %v", l, err)
+		}
+	}
+
+	summary := p.Summary()
+
+	// Boot separator → unstructured.
+	if got := len(summary["unstructured"]); got != 1 {
+		t.Errorf("unstructured sources = %d, want 1 (boot separator)", got)
+	}
+
+	bySource := make(map[string]int)
+	for _, e := range summary["info"] {
+		bySource[e.Source] = e.Occurrences
+	}
+
+	// Three kernel lines collapse to one source.
+	if bySource["kernel"] != 3 {
+		t.Errorf("kernel occurrences = %d, want 3", bySource["kernel"])
+	}
+	// Two pluto[2541] lines.
+	if bySource["pluto[2541]"] != 2 {
+		t.Errorf("pluto[2541] occurrences = %d, want 2", bySource["pluto[2541]"])
+	}
+	// One systemd[1] line.
+	if bySource["systemd[1]"] != 1 {
+		t.Errorf("systemd[1] occurrences = %d, want 1", bySource["systemd[1]"])
+	}
+}
+
 func TestShellTraceLineInheritsTimestamp(t *testing.T) {
 	// Shell xtrace lines (++ cmd) have no timestamp and should inherit the
 	// last seen timestamp and be captured as unstructured.

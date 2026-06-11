@@ -97,6 +97,11 @@ var klogLevelToSeverity = map[byte]Severity{
 // has been stripped: | SEQ | MODULE | LEVEL | MESSAGE
 var ovsPattern = regexp.MustCompile(`\|\s*\d+\s*\|\s*(\S+)\s*\|\s*(\w+)\s*\|\s*(.*)`)
 
+// journalPattern matches syslog-style journal lines:
+//
+//	Mon DD HH:MM:SS.ffffff HOSTNAME SERVICE[PID]: MESSAGE
+var journalPattern = regexp.MustCompile(`^([A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+\S+\s+(\S+):\s*(.*)`)
+
 // ovsHexID matches OVN tunnel/connection hex identifiers, e.g. ovn-58c153-
 var ovsHexID = regexp.MustCompile(`ovn-[0-9a-f]{4,}-`)
 

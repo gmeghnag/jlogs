@@ -76,6 +76,22 @@ func (p *Parser) parseLine(line string) error {
 		return nil
 	}
 
+	// Try syslog/journal format: Mon DD HH:MM:SS.ffffff HOSTNAME SERVICE[PID]: MESSAGE
+	// Only attempted when no RFC3339 prefix was found (rest == line).
+	if !found {
+		if m := journalPattern.FindStringSubmatch(rest); m != nil {
+			ts := journalTimestamp(m[1], p.lastTimestamp)
+			if ts != "" {
+				p.lastTimestamp = ts
+			} else {
+				ts = timestamp
+			}
+			source := strings.TrimSuffix(m[2], ":")
+			p.addEntry(SevInfo, source, ts, m[3])
+			return nil
+		}
+	}
+
 	// Try JSON-structured format. Cheap shape check before invoking the
 	// JSON decoder, which is comparatively expensive.
 	if strings.HasPrefix(rest, "{") && strings.HasSuffix(rest, "}") {
@@ -87,6 +103,22 @@ func (p *Parser) parseLine(line string) error {
 	// Catch-all: didn't match any known format, capture as unstructured.
 	p.addEntry(SevUnstructured, "unstructured", timestamp, rest)
 	return nil
+}
+
+// journalTimestamp converts a syslog-style timestamp ("Mar 11 11:34:49.808770")
+// to an RFC3339Nano string. Year is taken from lastTimestamp when available
+// (first 4 bytes), falling back to the current year.
+func journalTimestamp(s, lastTimestamp string) string {
+	year := strconv.Itoa(time.Now().Year())
+	if len(lastTimestamp) >= 4 {
+		year = lastTimestamp[:4]
+	}
+	// Prepend the year so Go's reference layout can parse it.
+	t, err := time.Parse("2006 Jan _2 15:04:05.999999999", year+" "+s)
+	if err != nil {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
 }
 
 // normalizeOVSMessage replaces parameterized parts of an OVS log message with
