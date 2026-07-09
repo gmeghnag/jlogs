@@ -75,14 +75,14 @@ func (s SourceSummary) MarshalJSON() ([]byte, error) {
 	return jsonMarshal(out)
 }
 
-// klogPattern matches a klog-formatted log line. The leading (\S+) captures
-// the RFC3339-ish timestamp prefix the upstream logging pipeline prepends.
+// klogPattern matches a klog-formatted log line after the timestamp prefix
+// has already been stripped by extractTimestamp.
 //
-//	1: timestamp prefix (e.g. 2024-12-30T10:46:29.390512670Z)
-//	2: klog level + date (e.g. I1230)
-//	3: source file:line   (e.g. node_controller.go:1056)
-//	4: message            (rest of line)
-var klogPattern = regexp.MustCompile(`(\S+)\s+([IWEF]\d{4})\s+\S+\s+\d+\s+(\S+\.go:\d+)\]\s+(.*)`)
+//	1: klog level + date (e.g. I1230)
+//	2: klog wall-clock time (e.g. 10:46:29.390512)
+//	3: source file:line  (e.g. node_controller.go:1056)
+//	4: message           (rest of line)
+var klogPattern = regexp.MustCompile(`([IWEF]\d{4})\s+(\S+)\s+\d+\s+(\S+\.go:\d+)\]\s+(.*)`)
 
 // klogLevelToSeverity maps the single-letter klog prefix to our canonical
 // severity. Anything not in this map is unknown and dropped.
@@ -91,6 +91,29 @@ var klogLevelToSeverity = map[byte]Severity{
 	'W': SevWarning,
 	'E': SevError,
 	'F': SevFatal,
+}
+
+// ovsPattern matches OVS pipe-delimited log lines after the timestamp prefix
+// has been stripped: | SEQ | MODULE | LEVEL | MESSAGE
+var ovsPattern = regexp.MustCompile(`\|\s*\d+\s*\|\s*(\S+)\s*\|\s*(\w+)\s*\|\s*(.*)`)
+
+// journalPattern matches syslog-style journal lines:
+//
+//	Mon DD HH:MM:SS.ffffff HOSTNAME SERVICE[PID]: MESSAGE
+var journalPattern = regexp.MustCompile(`^([A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+\S+\s+(\S+):\s*(.*)`)
+
+// ovsHexID matches OVN tunnel/connection hex identifiers, e.g. ovn-58c153-
+var ovsHexID = regexp.MustCompile(`ovn-[0-9a-f]{4,}-`)
+
+// ovsParenNum matches parenthesized numbers, e.g. (125)
+var ovsParenNum = regexp.MustCompile(`\(\d+\)`)
+
+// ovsLevelToSeverity maps OVS severity strings to canonical severities.
+var ovsLevelToSeverity = map[string]Severity{
+	"INFO": SevInfo,
+	"WARN": SevWarning,
+	"ERR":  SevError,
+	"EMER": SevFatal,
 }
 
 // jsonLevelToSeverity maps the strings that may appear in a structured log's
@@ -114,6 +137,7 @@ type Parser struct {
 	since         time.Duration // filter logs to last N duration from latest timestamp
 	latestTime    time.Time     // latest timestamp seen during parsing
 	hasLatestTime bool          // whether we've seen any valid timestamps
+	lastTimestamp string        // most-recently-seen timestamp for timestamp-less lines
 	// buckets[severity][source] -> aggregator
 	buckets map[Severity]map[string]*sourceAggregator
 
@@ -303,7 +327,7 @@ func (p *Parser) addEntry(sev Severity, source, timestamp string, message any) {
 		agg.first = append(agg.first, Occurrence{Time: timestamp, Log: message})
 	}
 
-	if p.timelineInterval != "" {
+	if p.timelineInterval != "" && timestamp != "" {
 		intervalKey := timelineIntervalKey(timestamp, p.timelineInterval)
 		sourceBucket, ok := p.timelineBuckets[intervalKey]
 		if !ok {
